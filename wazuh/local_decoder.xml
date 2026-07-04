@@ -1,0 +1,17 @@
+<!--
+  threat_meister Wazuh decoders
+  Append to: /var/ossec/etc/decoders/local_decoder.xml   (on the Wazuh MANAGER)
+  Then restart: sudo systemctl restart wazuh-manager
+
+  Parses the "wazuh-yara: INFO - Scan result: <rule> <file>" lines that the
+  yara.sh active-response script writes to active-responses.log.
+-->
+<decoder name="yara_decoder">
+  <prematch>wazuh-yara:</prematch>
+</decoder>
+
+<decoder name="yara_decoder1">
+  <parent>yara_decoder</parent>
+  <regex>wazuh-yara: (\S+) - Scan result: (\S+) (\S+)</regex>
+  <order>log_type, yara_rule, yara_scanned_file</order>
+</decoder>

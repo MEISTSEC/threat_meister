@@ -1,0 +1,62 @@
+<!--
+  threat_meister Wazuh rules
+  Append to: /var/ossec/etc/rules/local_rules.xml   (on the Wazuh MANAGER)
+  Restart:   sudo systemctl restart wazuh-manager
+
+  Adjust the dropzone path (/opt/threat_meister/dropzone) to match what you monitor in
+  the agent's <syscheck> block. Rules 100200/100201 are what Active Response
+  keys off (see ossec.conf). 108001 is the actionable "YARA matched" alert.
+-->
+<group name="syscheck,threat_meister,">
+
+  <!-- FIM: file modified in the dropzone -->
+  <rule id="100200" level="7">
+    <if_sid>550</if_sid>
+    <field name="file">/opt/threat_meister/dropzone</field>
+    <description>threat_meister: file modified in dropzone ($(file)).</description>
+  </rule>
+
+  <!-- FIM: file added to the dropzone -->
+  <rule id="100201" level="7">
+    <if_sid>554</if_sid>
+    <field name="file">/opt/threat_meister/dropzone</field>
+    <description>threat_meister: file added to dropzone ($(file)).</description>
+  </rule>
+
+</group>
+
+<group name="yara,threat_meister,">
+
+  <!-- grouping rule: anything the yara_decoder decoded -->
+  <rule id="108000" level="0">
+    <decoded_as>yara_decoder</decoded_as>
+    <description>YARA grouping rule.</description>
+  </rule>
+
+  <!-- actionable: a YARA rule matched a file -->
+  <rule id="108001" level="12">
+    <if_sid>108000</if_sid>
+    <match>wazuh-yara: INFO - Scan result: </match>
+    <description>YARA match: "$(yara_scanned_file)" matched rule $(yara_rule).</description>
+    <mitre>
+      <id>T1204</id>
+    </mitre>
+    <group>malware,pci_dss_10.6.1,pci_dss_11.4,</group>
+  </rule>
+
+</group>
+
+<!--
+  Optional: elevate matches for specific high-severity families by name.
+  Because threat_meister writes the family into the YARA rule name, you can pivot on it.
+-->
+<group name="yara,threat_meister,ransomware,">
+  <rule id="108010" level="14">
+    <if_sid>108001</if_sid>
+    <field name="yara_rule" type="pcre2">(?i)ransom|lock|crypt|wiper</field>
+    <description>YARA match on likely ransomware/wiper: rule $(yara_rule) on $(yara_scanned_file).</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+  </rule>
+</group>

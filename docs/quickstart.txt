@@ -1,0 +1,21 @@
+threat_meister quickstart (with integrated threathunt intel)
+====================================================
+  ./setup_lab.sh                 # Arch: install tooling + modules + init lab
+  export PATH="$HOME/.local/bin:$PATH"
+
+  # --- static analysis + detection engineering ---
+  threat_meister ingest sample.bin --family <f> --category <c> --platform elf
+  threat_meister triage 1 --save-iocs --deep
+  threat_meister attack 1 T1486 ; threat_meister note 1 "observations" --phase static
+  threat_meister yara-new 1 --author "$USER"
+  threat_meister yara-test <rule> --against 1
+  threat_meister yara-bundle           # -> exports/lab_rules.yar for Wazuh
+
+  # --- threat intelligence (needs VT_API_KEY) ---
+  export VT_API_KEY="your_key"
+  threat_meister enrich 1              # VT-score hash + IOCs, reflect onto sample
+  threat_meister enrich --all
+  threat_meister intel 185.220.101.45  # ad-hoc, catalog-aware
+  threat_meister hunt --wazuh alerts.json --rita beacons.csv --report hunt.md
+
+  # then deploy wazuh/* + exports/lab_rules.yar per README.md
