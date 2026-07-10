@@ -32,6 +32,60 @@ truth, samples are stored inert, and every detection artifact (YARA rule,
 ClamAV signature, IOC export) is generated *from* the catalog** so nothing drifts
 out of sync.
 
+In a hurry? See `docs/quickstart.txt` for the end-to-end command sequence.
+
+## Installation
+
+**Get the code.** Clone the repo (or use GitHub's "Download ZIP" and extract it):
+
+```bash
+git clone https://github.com/MEISTSEC/threat_meister.git
+cd threat_meister
+```
+
+**Install (Arch Linux).** Review `setup_lab.sh` first — it uses `sudo`, installs
+packages, and enables services — then run it from the repo root:
+
+```bash
+less setup_lab.sh          # read before running anything with sudo
+./setup_lab.sh
+export PATH="$HOME/.local/bin:$PATH"   # add to ~/.bashrc to persist
+```
+
+It installs the toolchain, copies the three modules into
+`~/.local/lib/threat_meister/`, symlinks `threat_meister` / `tm` / `threathunt`
+into `~/.local/bin`, initializes the lab under `$THREAT_MEISTER_ROOT` (default
+`~/threat_meister`), and runs a smoke test that fails loudly if anything is out
+of sync.
+
+**Other distros / manual install.** `setup_lab.sh` is Arch-specific (pacman/AUR),
+but the tool itself is stdlib-only Python 3. On other systems, install the
+optional binaries your package manager provides (`yara`, `clamav`, `rkhunter`,
+`radare2`, `ssdeep`, `jq`) and place the three `src/*.py` files **together** in
+one directory on your `PATH` — they import each other as siblings:
+
+```bash
+install -d ~/.local/lib/threat_meister ~/.local/bin
+install -m644 src/threathunt.py src/intel.py ~/.local/lib/threat_meister/
+install -m755 src/threat_meister.py ~/.local/lib/threat_meister/
+printf '#!/bin/sh\nexec python3 "%s/threat_meister.py" "$@"\n' \
+  "$HOME/.local/lib/threat_meister" > ~/.local/bin/threat_meister
+chmod 755 ~/.local/bin/threat_meister
+threat_meister init
+```
+
+**Configure your VirusTotal key.** Put it wherever the resolver looks (see the
+threat-intel section); the zero-flag default is `~/.secrets/bug_bounty.env`:
+
+```bash
+mkdir -p ~/.secrets && chmod 700 ~/.secrets
+echo 'export VT_API_KEY="your_key"' > ~/.secrets/bug_bounty.env
+chmod 600 ~/.secrets/bug_bounty.env
+```
+
+**Deploy the Wazuh pieces** per "Wazuh wiring" below (manager and agent are
+separate hosts).
+
 ## Architecture and data flow
 
 ```
@@ -134,17 +188,82 @@ Threat-intel commands (the `threathunt` bridge):
 - `threat_meister hunt [threathunt args]` — run a full hunt over Wazuh/Rita/UniFi
   exports (`--wazuh`, `--rita`, `--unifi`, `--report hunt.md`, `--min-score N`).
   Catalog-aware: indicators matching a known sample get annotated and up-scored.
+  Alert sources on another host are pulled in over SSH (see below).
 - `threat_meister intel <ioc…>` — ad-hoc VirusTotal check of IPs/domains/hashes, also
   catalog-aware.
 
-These need a VirusTotal API key (`export VT_API_KEY=…`, or `--api-key`, or a
-`.env`). They share one SQLite store (`threathunt.db`) under the lab root, and
-respect the VT free-tier limits (4/min, 500/day) with a resume queue for
+These need a VirusTotal API key. It is resolved in this order, first match wins:
+`--api-key`, then `$VT_API_KEY`, then a `.env`-style file — `--env-file <path>`,
+`$VT_ENV_FILE`, `./.env`, and finally `~/.secrets/bug_bounty.env`. That last
+default lets you keep the key in your existing secrets file, out of shell history
+and the process environment; the file may use `export VT_API_KEY=…`, quotes, and
+`#` comments. They share one SQLite store (`threathunt.db`) under the lab root,
+and respect the VT free-tier limits (4/min, 500/day) with a resume queue for
 overflow. `threathunt.py` remains runnable on its own — the threat_meister integration
 is a set of default-off hooks that only activate when threat_meister drives it.
 
 The tool is stdlib-only; optional libraries/binaries are auto-detected and it
 degrades gracefully when they're absent.
+
+## Threat hunting: sources, scale, and remote Wazuh
+
+`threat_meister hunt` (and the standalone `threathunt hunt`) enriches indicators
+of compromise pulled from your existing stack, scores each 0–100 by combining
+VirusTotal reputation with local behavioural signals, and writes a report plus a
+persistent findings history.
+
+**Sources.** Pass any combination; indicators are de-duplicated across them, so a
+host seen by several sources is enriched once and tagged with all of them:
+
+- `--wazuh <alerts.json>` — Wazuh alerts (NDJSON or a JSON array). IOCs are drawn
+  from `data.srcip`/`dstip`, `data.url`, and `syscheck` file hashes, with the
+  rule level attached as behavioural context.
+- `--rita <export.csv>` — a Rita CSV export; beacon score, connection count, and
+  bytes become behavioural context (columns auto-detected across Rita versions).
+- `--unifi <threats.csv>` — a UniFi CyberSecure threat CSV exported from the UI;
+  severity and signature become context (columns auto-detected across firmware).
+
+**Remote Wazuh manager (SSH pull).** When the manager runs on another box — the
+usual setup, with agents forwarding to a central manager that writes one
+`alerts.json` — point the hunt at the remote file and it is streamed down over
+SSH before parsing. It shells out to the system `ssh`, so it uses your existing
+keys, agent, `~/.ssh/config` aliases, and `known_hosts`; no new dependency, no
+keys stored in the tool.
+
+```bash
+threat_meister hunt \
+    --wazuh-ssh admin@wazuh:/var/ossec/logs/alerts/alerts.json --wazuh-sudo \
+    --rita beacons.csv --unifi threats.csv \
+    --report hunt-$(date +%F).md --min-score 40
+```
+
+The alerts file is owned `wazuh:wazuh` (mode 660), so a normal SSH user can't
+read it: either add your user to the `wazuh` group on the manager, or pass
+`--wazuh-sudo` (which runs `sudo -n cat` remotely; for an unattended run, grant
+NOPASSWD sudo for that one `cat`). Extra SSH options pass through with
+`--ssh-opt "-p 2222 -i ~/.ssh/hunt_key"`, and `--rita-ssh` does the same for a
+Rita export on another host. `--wazuh` and `--wazuh-ssh` are mutually exclusive.
+
+> Note: `alerts.json` holds the current day; older days rotate into
+> `/var/ossec/logs/alerts/<year>/<month>/`. For a true month-wide hunt,
+> concatenate the rotated files on the manager before fetching, or query the
+> Wazuh indexer API.
+
+**Large hunts and the free tier.** The VT free key allows ~500 lookups/day. When
+a hunt has more new indicators than that, nothing is silently dropped: indicators
+are triaged by a local-signal priority *before* any quota is spent (multi-source
+agreement, Wazuh severity, Rita beacon strength, UniFi severity, traffic volume),
+enrichment runs highest-priority first, and the overflow is saved to a resume
+queue. The next run drains that queue first, so a 1,500-indicator hunt spreads
+over a few days with the scariest indicators checked on day one. Cache hits never
+count against the cap, so month-over-month repeats are free. Check the backlog
+with `threathunt queue`.
+
+**Reports.** `--report <file>` writes `.json`, `.csv`, or `.md`. The Markdown
+report leads with a band-count summary and a findings table (highest risk first),
+then per-band detail sections (Critical → Elevated → Watch) that show each
+indicator's VT verdict, the scoring rationale, and the Wazuh/Rita/UniFi context
+that justified it — ready to drop into a ticket or writeup.
 
 ## Daily workflow (SOP)
 
@@ -168,9 +287,10 @@ degrades gracefully when they're absent.
    an alert appears in the Wazuh dashboard.
 9. **Periodic hunt.** `threat_meister hunt --wazuh alerts.json --rita beacons.csv
    --report hunt-$(date +%F).md` — any indicator that ties back to a catalogued
-   sample is flagged as known lab infrastructure in the report.
+   sample is flagged as known lab infrastructure in the report. If the manager is
+   remote, use `--wazuh-ssh` as shown above.
 
-## Arch tooling
+## Install (Arch)
 
 `setup_lab.sh` installs, from the official repos: `yara`, `clamav`, `rkhunter`,
 `jq`, `radare2`, `binutils`, `file`, `ssdeep`, `chkrootkit`, `lynis`. From the
@@ -178,16 +298,49 @@ AUR (via yay/paru): `capa` (ATT&CK capabilities), `detect-it-easy` (packer ID),
 `pev` (PE toolkit), `python-tlsh`, and `wazuh-agent`. It removes the `Example`
 line from the ClamAV configs, enables `clamav-freshclam` + `clamav-daemon`,
 baselines rkhunter (`--propupd`) and adds a weekly scan timer, creates the
-`/opt/threat_meister/dropzone`, and initializes the catalog.
+`/opt/threat_meister/dropzone`, installs the three modules
+(`threathunt.py`, `intel.py`, `threat_meister.py`) side by side into
+`~/.local/lib/threat_meister/`, and initializes the catalog.
+
+After install it runs a **post-install smoke test**: it confirms the three
+modules import together, that their wiring is consistent (the reconciled
+`threathunt` exposes both the SSH pull and the catalog hook; `intel.enrich_samples`
+takes the `catalog_db` argument that `threat_meister` passes), and that both the
+`threat_meister` and standalone `threathunt` entry points respond. If anything
+has drifted out of sync it fails loudly at install time rather than mid-hunt.
+
+Review the script before running it — it uses `sudo` and touches system services.
 
 Note: on Arch the YARA binary is `/usr/bin/yara`, so the manager's
 `extra_args` uses `-yara_path /usr/bin` (the Wazuh docs use `/usr/local/bin`
 because they compile from source on Ubuntu).
 
+### Layout and staying in sync
+
+The three modules are siblings in `src/`; `threat_meister.py` adds its own
+directory to `sys.path` and imports `threathunt` and `intel` as siblings. There
+is exactly one `src/threathunt.py` — the canonical engine — and it is the same
+file that runs standalone. Keep it that way: don't hand-copy `threathunt.py`
+elsewhere in the tree, so the standalone and the vendored engine can never
+diverge. The install smoke test is the backstop that catches it if they do.
+
 ## Wazuh wiring
 
-Files are in `wazuh/`. The split is: decoders + rules + AR binding live on the
-**manager**; FIM + log collection live on the **agent** (your analysis host).
+The `wazuh/` directory ships everything needed to wire the pipeline:
+
+- `local_decoder.xml` — decodes the `wazuh-yara: … Scan result: <rule> <file>`
+  lines into the `yara_rule` / `yara_scanned_file` fields (manager).
+- `local_rules.xml` — FIM rules `100200`/`100201` (dropzone modified/added), the
+  actionable match rule `108001` (level 12), and the ransomware/wiper elevation
+  `108010` (level 14) that pivots on the family encoded in the rule name (manager).
+- `ossec_manager_snippet.conf` — the `yara_linux` command + active-response
+  binding that runs `yara.sh` on `100200,100201` (manager).
+- `ossec_agent_snippet.conf` — realtime FIM on the dropzone, ClamAV + rkhunter
+  log collection, and the rkhunter command wodle (agent).
+- `yara.sh` — the active-response script itself (agent).
+
+The split is: decoders + rules + AR binding live on the **manager**; FIM + log
+collection live on the **agent** (your analysis host).
 
 On the **manager**:
 1. Append `wazuh/local_decoder.xml` to `/var/ossec/etc/decoders/local_decoder.xml`.
@@ -215,6 +368,11 @@ ransomware/wiper rule names via `108010`).
 ClamAV daemon/freshclam logs and rkhunter warnings are collected via the
 `<localfile>` blocks and the rkhunter command wodle in the agent snippet, so
 they show up alongside YARA alerts.
+
+Note on hosts: the agent snippet and the dropzone belong on your **analysis
+host**. The `threat_meister hunt` step reads the manager's `alerts.json`, which
+lives on the **manager** — pull it over SSH with `--wazuh-ssh` when that's a
+different box.
 
 ## Dashboards and alerts
 
@@ -245,7 +403,9 @@ to rule ids `108001`/`108010`.
 - Treat the ClamAV hash `.hdb` and YARA bundle as artifacts you regenerate from
   the catalog — edit the catalog, re-export, redeploy; don't hand-edit deployed
   files.
-```
+- The hunt is read-only on your sources: it never modifies Wazuh, Rita, or UniFi
+  data, and private / loopback / link-local IPs are filtered out before any
+  lookup, so internal addressing is never sent to VirusTotal.
 
 ## License
 

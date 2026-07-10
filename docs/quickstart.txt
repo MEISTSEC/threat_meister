@@ -2,6 +2,7 @@ threat_meister quickstart (with integrated threathunt intel)
 ====================================================
   ./setup_lab.sh                 # Arch: install tooling + modules + init lab
   export PATH="$HOME/.local/bin:$PATH"
+                                 # setup runs a smoke test; check it says PASS
 
   # --- static analysis + detection engineering ---
   threat_meister ingest sample.bin --family <f> --category <c> --platform elf
@@ -11,11 +12,30 @@ threat_meister quickstart (with integrated threathunt intel)
   threat_meister yara-test <rule> --against 1
   threat_meister yara-bundle           # -> exports/lab_rules.yar for Wazuh
 
-  # --- threat intelligence (needs VT_API_KEY) ---
-  export VT_API_KEY="your_key"
+  # --- threat intelligence (needs a VirusTotal key) ---
+  # key resolution (first match wins): --api-key, $VT_API_KEY, --env-file,
+  # $VT_ENV_FILE, ./.env, then ~/.secrets/bug_bounty.env
+  export VT_API_KEY="your_key"          # or just put it in ~/.secrets/bug_bounty.env:
+                                        #   export VT_API_KEY="..."
   threat_meister enrich 1              # VT-score hash + IOCs, reflect onto sample
   threat_meister enrich --all
   threat_meister intel 185.220.101.45  # ad-hoc, catalog-aware
   threat_meister hunt --wazuh alerts.json --rita beacons.csv --report hunt.md
+  threat_meister hunt --unifi threats.csv --min-score 40   # + UniFi CyberSecure
+
+  # --- remote Wazuh manager? pull alerts.json over SSH (uses your ssh keys) ---
+  threat_meister hunt \
+    --wazuh-ssh admin@wazuh:/var/ossec/logs/alerts/alerts.json --wazuh-sudo \
+    --rita beacons.csv --report hunt-$(date +%F).md
+                                 # --wazuh-sudo: alerts file is wazuh:wazuh 660
+                                 # --ssh-opt "-p 2222 -i ~/.ssh/key" for extras
+
+  # --- big hunt over the free-tier cap (500/day)? nothing is dropped ---
+  threat_meister queue                 # show indicators queued for resume
+  threat_meister hunt ...              # re-run: drains the queue first, then new
 
   # then deploy wazuh/* + exports/lab_rules.yar per README.md
+
+  # threathunt also runs standalone (same engine, no catalog awareness):
+  threathunt hunt --wazuh alerts.json --report hunt.md
+  threathunt check 185.220.101.45 evil.example <sha256>

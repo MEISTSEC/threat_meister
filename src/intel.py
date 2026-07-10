@@ -92,9 +92,26 @@ def make_catalog_lookup(catalog_db: Path) -> Callable[[str], Optional[dict]]:
     Matches a VT indicator against the catalog by file hash (sha256/sha1/md5)
     or against previously-extracted IOC values. Holds one connection open for
     the life of the hunt so large runs stay cheap.
+
+    Connection lifecycle: the returned closure keeps this SQLite connection
+    open deliberately — it must outlive this function and stay usable for
+    every lookup during a hunt. It is owned by the *process*: there's one per
+    catalog per driver invocation, and it is released when the process exits
+    (a CLI run) — SQLite read connections hold no locks, so this is safe.
+    A `.close` attribute is attached to the returned callable so a long-lived
+    or looping host (e.g. a daemon that runs many hunts) can release it
+    explicitly instead of accumulating handles:
+
+        lookup = make_catalog_lookup(db)
+        th.LOCAL_CATALOG_LOOKUP = lookup
+        ...                      # run the hunt
+        lookup.close()           # optional; unnecessary for a one-shot CLI
     """
     if not catalog_db.exists():
-        return lambda value: None
+        noop: Callable[[str], Optional[dict]] = lambda value: None
+        noop.close = lambda: None          # type: ignore[attr-defined]
+        return noop
+
     conn = sqlite3.connect(str(catalog_db))
     conn.row_factory = sqlite3.Row
 
@@ -119,6 +136,8 @@ def make_catalog_lookup(catalog_db: Path) -> Callable[[str], Optional[dict]]:
                     "via": "extracted-ioc"}
         return None
 
+    # Expose an explicit closer for long-lived hosts; harmless to ignore in a CLI.
+    lookup.close = conn.close              # type: ignore[attr-defined]
     return lookup
 
 
@@ -167,27 +186,39 @@ def reflect_onto_sample(conn: sqlite3.Connection, sample_id: int,
 
 def enrich_samples(conn: sqlite3.Connection, intel_db: Path,
                    sample_rows: list[sqlite3.Row], vt_client,
-                   ttl_hours: int) -> dict:
+                   ttl_hours: int, catalog_db: Path) -> dict:
     """Enrich the given samples' hashes + IOCs through the shared VT engine.
 
     `vt_client` is any object with threathunt's VirusTotalClient interface
-    (real client in production; a fake in tests). Returns a summary dict.
+    (real client in production; a fake in tests). `catalog_db` is the path to
+    the sample catalog (passed explicitly rather than reverse-engineered from
+    `conn`, which is not a reliable way to recover the file path). Returns a
+    summary dict.
     """
     store = th.Store(intel_db)
-    # wire the reverse lookup so cross-references appear even here
-    th.LOCAL_CATALOG_LOOKUP = make_catalog_lookup(Path(conn.execute("PRAGMA database_list").fetchone()[2]))
+    # Wire the reverse lookup so cross-references appear even during sample
+    # enrichment (e.g. an extracted IOC that also matches another sample).
+    lookup = make_catalog_lookup(catalog_db)
+    th.LOCAL_CATALOG_LOOKUP = lookup
 
     summary = {"samples": 0, "iocs": 0, "reflected": [], "overflow": 0}
-    for row in sample_rows:
-        iocs = sample_to_iocs(conn, row)
-        if not iocs:
-            continue
-        summary["iocs"] += len(iocs)
-        verdicts, overflow = th.enrich(iocs, vt_client, store, ttl_hours)
-        summary["overflow"] += len(overflow)
-        score = reflect_onto_sample(conn, row["id"], verdicts)
-        summary["samples"] += 1
-        summary["reflected"].append((row["id"], row["sha256"][:12], score))
+    try:
+        for row in sample_rows:
+            iocs = sample_to_iocs(conn, row)
+            if not iocs:
+                continue
+            summary["iocs"] += len(iocs)
+            verdicts, overflow = th.enrich(iocs, vt_client, store, ttl_hours)
+            summary["overflow"] += len(overflow)
+            score = reflect_onto_sample(conn, row["id"], verdicts)
+            summary["samples"] += 1
+            summary["reflected"].append((row["id"], row["sha256"][:12], score))
+    finally:
+        # Release the catalog connection opened for the reverse lookup. Safe in
+        # a one-shot CLI too; just avoids leaking a handle if a caller loops.
+        close = getattr(lookup, "close", None)
+        if callable(close):
+            close()
     return summary
 
 
@@ -205,13 +236,15 @@ def findings_for_sample(intel_db: Path, conn: sqlite3.Connection,
         return []
     fconn = sqlite3.connect(str(intel_db))
     fconn.row_factory = sqlite3.Row
-    out = []
-    for val in dict.fromkeys(values):
-        r = fconn.execute(
-            "SELECT ioc,kind,risk_score,malicious,suspicious,not_found "
-            "FROM findings WHERE ioc=? ORDER BY checked_at DESC LIMIT 1",
-            (val,)).fetchone()
-        if r:
-            out.append(dict(r))
-    fconn.close()
+    try:
+        out = []
+        for val in dict.fromkeys(values):
+            r = fconn.execute(
+                "SELECT ioc,kind,risk_score,malicious,suspicious,not_found "
+                "FROM findings WHERE ioc=? ORDER BY checked_at DESC LIMIT 1",
+                (val,)).fetchone()
+            if r:
+                out.append(dict(r))
+    finally:
+        fconn.close()
     return out

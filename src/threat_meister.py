@@ -801,12 +801,20 @@ def cmd_enrich(args):
         rows = [get_sample(conn, args.ref)]
     if not rows:
         die("no samples to enrich")
-    key = os.environ.get("VT_API_KEY", "") or (args.api_key or "")
+    # Resolve the key through threathunt's resolver so `enrich` honours the same
+    # sources as `hunt`/`intel`: --api-key, $VT_API_KEY, --env-file, $VT_ENV_FILE,
+    # ./.env, then ~/.secrets/bug_bounty.env.
+    key = th.get_api_key(argparse.Namespace(
+        api_key=args.api_key,
+        env_file=getattr(args, "env_file", None)))
     if not key:
-        die("no VirusTotal API key — set VT_API_KEY or pass --api-key")
+        die("no VirusTotal API key — set VT_API_KEY, pass --api-key, or add it "
+            "to --env-file / ~/.secrets/bug_bounty.env")
     limiter = th.RateLimiter(args.rate)
     vt = th.VirusTotalClient(key, limiter, args.daily_cap)
-    summary = intel.enrich_samples(conn, INTEL_DB, rows, vt, args.cache_ttl)
+    # Pass DB_PATH explicitly: intel.enrich_samples wires the reverse catalog
+    # lookup from this path rather than reverse-engineering it from `conn`.
+    summary = intel.enrich_samples(conn, INTEL_DB, rows, vt, args.cache_ttl, DB_PATH)
     print(f"enriched {summary['samples']} sample(s), {summary['iocs']} indicator(s); "
           f"{vt.calls_made} VT call(s)"
           + (f", {summary['overflow']} queued (cap reached)" if summary['overflow'] else ""))
@@ -895,7 +903,9 @@ def build_parser():
     g = sub.add_parser("enrich", help="VirusTotal-enrich a sample's hash + IOCs; reflect risk onto the catalog")
     g.add_argument("ref", nargs="?", help="sample id/hash (omit with --all)")
     g.add_argument("--all", action="store_true", help="enrich every catalogued sample")
-    g.add_argument("--api-key"); g.add_argument("--rate", type=int, default=4)
+    g.add_argument("--api-key"); g.add_argument("--env-file",
+        help="read VT_API_KEY from this .env file (else ~/.secrets/bug_bounty.env)")
+    g.add_argument("--rate", type=int, default=4)
     g.add_argument("--daily-cap", type=int, default=500)
     g.add_argument("--cache-ttl", type=int, default=168)
     g.set_defaults(func=cmd_enrich)

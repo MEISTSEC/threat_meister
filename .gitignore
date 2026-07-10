@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Packaging artifacts — the repo IS the source of truth; don't commit tarballs
+# or zips of the tree (they go stale and reintroduce drift).
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Local lab data (created by `threat_meister init` under $THREAT_MEISTER_ROOT,
+# default ~/threat_meister — outside this repo). If you ever point the lab root
+# inside a clone, these keep samples, the catalog, and the findings store out of
+# git. Anchored to the repo root so they don't clobber tracked source files.
+/catalog.db
+/threathunt.db
+*.db
+/store/
+/quarantine/
+/exports/
+/notes/
+
+# Secrets — API keys live in ~/.secrets/bug_bounty.env or a local .env, never here.
+.env
+*.env
+!docs/*.env.example
+
+# Editor / OS cruft
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/

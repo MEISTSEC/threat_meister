@@ -109,6 +109,74 @@ ln -sf "$LIBDIR/threathunt.py" "$HOME/.local/bin/threathunt" 2>/dev/null || true
 export PATH="$HOME/.local/bin:$PATH"
 THREAT_MEISTER_ROOT="$THREAT_MEISTER_ROOT" threat_meister init
 
+# --- 6. Post-install smoke test ---------------------------------------------
+# Catches the failure modes that silently bite a month later: a missing sibling
+# module, an import error, or a signature/divergence mismatch between the three
+# files (e.g. intel.enrich_samples expecting an argument threat_meister.py doesn't pass).
+# Cheap to run, and far better than discovering it mid-hunt.
+say "Smoke-testing the install"
+SMOKE_OK=1
+
+# 6a. All three modules import together from the install dir.
+if python3 - "$LIBDIR" <<'PYEOF'
+import sys
+libdir = sys.argv[1]
+sys.path.insert(0, libdir)
+try:
+    import threathunt, intel, threat_meister      # noqa: F401
+except Exception as e:
+    print(f"import error: {e}", file=sys.stderr)
+    sys.exit(1)
+
+# The reconciled threathunt must carry BOTH capabilities:
+#   - the SSH pull (remote Wazuh manager)         -> fetch_over_ssh
+#   - the catalog integration hook                -> LOCAL_CATALOG_LOOKUP
+missing = [n for n in ("fetch_over_ssh", "LOCAL_CATALOG_LOOKUP", "enrich", "score_risk")
+           if not hasattr(threathunt, n)]
+if missing:
+    print(f"threathunt missing: {', '.join(missing)} "
+          f"(is this the reconciled version?)", file=sys.stderr)
+    sys.exit(1)
+
+# intel.enrich_samples must accept the explicit catalog_db parameter, i.e. the
+# signature threat_meister.cmd_enrich now calls. Verify by introspection so a drift
+# between the two files is caught here, not at runtime.
+import inspect
+params = inspect.signature(intel.enrich_samples).parameters
+if "catalog_db" not in params:
+    print("intel.enrich_samples is missing the 'catalog_db' parameter "
+          "(threathunt/intel/threat_meister are out of sync)", file=sys.stderr)
+    sys.exit(1)
+
+# The reverse-lookup factory must return something closeable (leak fix).
+lk = intel.make_catalog_lookup(__import__("pathlib").Path("/nonexistent.db"))
+if not hasattr(lk, "close"):
+    print("intel.make_catalog_lookup result has no .close() (leak-fix missing)",
+          file=sys.stderr)
+    sys.exit(1)
+print("module wiring OK")
+PYEOF
+then :; else SMOKE_OK=0; fi
+
+# 6b. The CLI actually responds against the freshly-initialised catalog.
+if THREAT_MEISTER_ROOT="$THREAT_MEISTER_ROOT" threat_meister stats >/dev/null 2>&1; then :; else
+  warn "threat_meister stats did not run cleanly"
+  SMOKE_OK=0
+fi
+
+# 6c. threathunt standalone entry point responds.
+if THREAT_MEISTER_ROOT="$THREAT_MEISTER_ROOT" python3 "$LIBDIR/threathunt.py" --help >/dev/null 2>&1; then :; else
+  warn "threathunt --help did not run cleanly"
+  SMOKE_OK=0
+fi
+
+if [[ "$SMOKE_OK" -eq 1 ]]; then
+  say "Smoke test passed: modules import, wiring is consistent, CLIs respond."
+else
+  warn "Smoke test FAILED. Check that src/threathunt.py, src/intel.py and"
+  warn "src/threat_meister.py are the reconciled, in-sync versions before using the lab."
+fi
+
 cat <<EOF
 
 $(say "Base setup complete.")
@@ -126,6 +194,9 @@ Next steps:
        threat_meister enrich <id>              # or --all; VT-scores hash + IOCs
        threat_meister hunt --wazuh alerts.json --rita beacons.csv --report hunt.md
        threat_meister intel 185.220.101.45     # ad-hoc, catalog-aware
+  6. Remote Wazuh manager? Pull its alerts over SSH instead of a local path:
+       threat_meister hunt --wazuh-ssh admin@wazuh:/var/ossec/logs/alerts/alerts.json \\
+                    --wazuh-sudo --rita beacons.csv --report hunt.md
 
 Reminder: keep live samples OFF network-exposed dirs. The dropzone is only for
 detonation-detection testing of your own YARA bundle, not long-term storage.

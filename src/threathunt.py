@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2026 meistsec
 """
 threathunt.py — Monthly Threat Hunting with VirusTotal Enrichment
 ==================================================================
@@ -46,7 +44,7 @@ Usage
     ./threathunt.py hunt --wazuh alerts.json --report report.json
     ./threathunt.py hunt --rita beacons.csv --report report.csv
 
-Author: meistsec — released under the MIT License (see LICENSE). (c) 2026.
+Author: (you) — released under MIT, adapt freely for your blog post.
 """
 
 from __future__ import annotations
@@ -57,8 +55,11 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import sqlite3
+import subprocess
 import sys
+import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field, asdict
@@ -997,6 +998,92 @@ def _append_detail(out: list[str], v: Verdict, band_emoji: dict) -> None:
 
 
 # --------------------------------------------------------------------------
+# Remote fetch over SSH
+# --------------------------------------------------------------------------
+
+def _parse_ssh_target(spec: str) -> tuple[str, str]:
+    """
+    Split a 'user@host:/remote/path' (or 'host:/path') spec into (host, path).
+
+    We keep any user@ prefix attached to the host so it's passed straight to
+    ssh, which knows how to handle it (and honours ~/.ssh/config aliases too).
+    A bare host without a colon is rejected — we need to know which file.
+    """
+    if ":" not in spec:
+        raise SystemExit(
+            f"invalid SSH target '{spec}' — expected user@host:/path/to/file")
+    host, remote_path = spec.split(":", 1)
+    if not host or not remote_path:
+        raise SystemExit(
+            f"invalid SSH target '{spec}' — expected user@host:/path/to/file")
+    return host, remote_path
+
+
+def fetch_over_ssh(spec: str, *, use_sudo: bool = False,
+                   ssh_opts: Optional[list[str]] = None) -> Path:
+    """
+    Stream a remote file down to a local temp file by shelling out to the
+    system `ssh`. Dependency-free, and it inherits your keys, ~/.ssh/config
+    host aliases, agent, and known_hosts exactly as if you typed ssh yourself.
+
+    The Wazuh alerts file is owned by wazuh:wazuh (mode 660), so reading it
+    usually needs either membership in the wazuh group or sudo. Pass
+    use_sudo=True to prefix the remote read with `sudo` (needs NOPASSWD or a
+    tty; for cron, NOPASSWD on that one cat command is the usual approach).
+
+    Returns the local Path of the downloaded copy (caller cleans it up, or
+    lets the OS reap the temp dir).
+    """
+    host, remote_path = _parse_ssh_target(spec)
+
+    # Build the remote command. We cat the file and let ssh stream it to our
+    # stdout, which we capture into a temp file. shlex.quote guards against
+    # spaces / oddities in the remote path.
+    remote_cmd = f"cat {shlex.quote(remote_path)}"
+    if use_sudo:
+        remote_cmd = f"sudo -n {remote_cmd}"
+
+    cmd = ["ssh"]
+    # BatchMode makes ssh fail fast instead of hanging on a password prompt —
+    # important for an unattended monthly cron run.
+    cmd += ["-o", "BatchMode=yes"]
+    if ssh_opts:
+        cmd += ssh_opts
+    cmd += [host, remote_cmd]
+
+    suffix = Path(remote_path).suffix or ".dat"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="threathunt_ssh_"))
+    local_path = tmp_dir / (Path(remote_path).name or f"remote{suffix}")
+
+    eprint(f"{C.DIM}fetching {remote_path} from {host} over ssh …{C.RESET}")
+    try:
+        with local_path.open("wb") as out:
+            proc = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE,
+                                  timeout=300)
+    except FileNotFoundError:
+        raise SystemExit("`ssh` not found on PATH — is OpenSSH installed?")
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"ssh fetch from {host} timed out after 300s")
+
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", "replace").strip()
+        hint = ""
+        if "sudo" in err.lower() or "a password is required" in err.lower():
+            hint = ("\n  hint: the alerts file needs elevated read. Either add "
+                    "your user to the 'wazuh' group on the manager, or allow "
+                    "NOPASSWD sudo for `cat` on that path and pass --wazuh-sudo.")
+        elif "permission denied" in err.lower():
+            hint = ("\n  hint: check the file is readable by your SSH user "
+                    "(wazuh:wazuh, mode 660), or use --wazuh-sudo.")
+        raise SystemExit(f"ssh fetch failed (exit {proc.returncode}): {err}{hint}")
+
+    if local_path.stat().st_size == 0:
+        eprint(f"{C.YELLOW}warn{C.RESET}: fetched file is empty — "
+               f"is {remote_path} the right path, and non-empty today?")
+    return local_path
+
+
+# --------------------------------------------------------------------------
 # Core enrichment pipeline
 # --------------------------------------------------------------------------
 
@@ -1108,17 +1195,64 @@ def enrich(iocs: list[IOC], vt: VirusTotalClient, store: Store,
 # CLI
 # --------------------------------------------------------------------------
 
+def _read_env_file(path: Path, key: str = "VT_API_KEY") -> str:
+    """Pull KEY from a .env-style file. Tolerates `export KEY=val`, surrounding
+    quotes, inline whitespace, blank lines and # comments. Returns "" if the
+    file is missing or the key isn't present."""
+    try:
+        if not path.is_file():
+            return ""
+    except OSError:
+        return ""
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        name, val = line.split("=", 1)
+        if name.strip() != key:
+            continue
+        val = val.strip()
+        if val[:1] in ("'", '"'):
+            # Quoted value: take exactly what's inside the matching quote and
+            # ignore anything after it (e.g. a trailing " # comment").
+            quote = val[0]
+            end = val.find(quote, 1)
+            if end != -1:
+                return val[1:end]
+            # unbalanced quote — fall through and treat literally
+            val = val[1:]
+        elif " #" in val:
+            # Unquoted value: strip a trailing inline comment.
+            val = val.split(" #", 1)[0].strip()
+        return val.strip()
+    return ""
+
+
 def get_api_key(args) -> str:
+    # 1. explicit flag wins
     if getattr(args, "api_key", None):
         return args.api_key
+    # 2. environment variable
     if os.environ.get("VT_API_KEY"):
         return os.environ["VT_API_KEY"]
-    # tiny .env reader so the blog readers don't need python-dotenv
-    env = Path(".env")
-    if env.exists():
-        for line in env.read_text().splitlines():
-            if line.startswith("VT_API_KEY="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    # 3. env files, in priority order. --env-file and $VT_ENV_FILE let you point
+    #    anywhere; otherwise we check a local .env then your secrets file. This
+    #    keeps the key out of shell history and the process environment.
+    candidates: list[Path] = []
+    if getattr(args, "env_file", None):
+        candidates.append(Path(args.env_file).expanduser())
+    if os.environ.get("VT_ENV_FILE"):
+        candidates.append(Path(os.environ["VT_ENV_FILE"]).expanduser())
+    candidates.append(Path(".env"))
+    candidates.append(Path.home() / ".secrets" / "bug_bounty.env")
+    for path in candidates:
+        key = _read_env_file(path)
+        if key:
+            return key
     return ""
 
 
@@ -1141,8 +1275,26 @@ def cmd_hunt(args) -> int:
     limiter = RateLimiter(args.rate)
     vt = VirusTotalClient(get_api_key(args), limiter, args.daily_cap)
 
-    wazuh = Path(args.wazuh) if args.wazuh else None
-    rita = Path(args.rita) if args.rita else None
+    ssh_opts = shlex.split(args.ssh_opt) if args.ssh_opt else None
+
+    # A source can be either a local path or a remote user@host:/path (--*-ssh).
+    # Remote sources are streamed down first and then parsed exactly like a
+    # local file, so the rest of the pipeline doesn't care where they came from.
+    if args.wazuh and args.wazuh_ssh:
+        raise SystemExit("use either --wazuh or --wazuh-ssh, not both")
+    if args.wazuh_ssh:
+        wazuh = fetch_over_ssh(args.wazuh_ssh, use_sudo=args.wazuh_sudo,
+                               ssh_opts=ssh_opts)
+    else:
+        wazuh = Path(args.wazuh) if args.wazuh else None
+
+    if args.rita and args.rita_ssh:
+        raise SystemExit("use either --rita or --rita-ssh, not both")
+    if args.rita_ssh:
+        rita = fetch_over_ssh(args.rita_ssh, ssh_opts=ssh_opts)
+    else:
+        rita = Path(args.rita) if args.rita else None
+
     unifi = Path(args.unifi) if args.unifi else None
 
     # Pull anything left over from a previous capped run first — these have
@@ -1154,7 +1306,7 @@ def cmd_hunt(args) -> int:
 
     fresh = collect_iocs(wazuh, rita, args.indicators, unifi=unifi)
     if not fresh and not resumed:
-        eprint("Nothing to hunt — pass --wazuh, --rita, --unifi, "
+        eprint("Nothing to hunt — pass --wazuh(-ssh), --rita(-ssh), --unifi, "
                "and/or indicators.")
         return 2
 
@@ -1219,7 +1371,10 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--db", default=str(DEFAULT_DB_PATH),
                         help=f"SQLite path (default: {DEFAULT_DB_PATH})")
-    common.add_argument("--api-key", help="VirusTotal API key (else $VT_API_KEY or .env)")
+    common.add_argument("--api-key", help="VirusTotal API key (else $VT_API_KEY, "
+                        "--env-file, $VT_ENV_FILE, ./.env, or ~/.secrets/bug_bounty.env)")
+    common.add_argument("--env-file", help="path to a .env file to read VT_API_KEY from "
+                        "(checked before ./.env and ~/.secrets/bug_bounty.env)")
     common.add_argument("--rate", type=int, default=DEFAULT_RATE_PER_MIN,
                         help=f"max VT requests/min (default {DEFAULT_RATE_PER_MIN})")
     common.add_argument("--daily-cap", type=int, default=DEFAULT_DAILY_CAP,
@@ -1240,9 +1395,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     h = sub.add_parser("hunt", parents=[common],
                        help="run a full monthly hunt over Wazuh/Rita/UniFi exports")
-    h.add_argument("--wazuh", help="path to Wazuh alerts (JSON / NDJSON)")
-    h.add_argument("--rita", help="path to a Rita CSV export")
+    h.add_argument("--wazuh", help="path to a LOCAL Wazuh alerts file (JSON / NDJSON)")
+    h.add_argument("--wazuh-ssh", metavar="USER@HOST:/PATH",
+                   help="fetch Wazuh alerts from a remote manager over ssh, "
+                        "e.g. admin@wazuh:/var/ossec/logs/alerts/alerts.json")
+    h.add_argument("--wazuh-sudo", action="store_true",
+                   help="use `sudo -n cat` on the remote read (alerts file is "
+                        "wazuh:wazuh mode 660; needs NOPASSWD sudo for cron)")
+    h.add_argument("--rita", help="path to a LOCAL Rita CSV export")
+    h.add_argument("--rita-ssh", metavar="USER@HOST:/PATH",
+                   help="fetch a Rita CSV from a remote host over ssh")
     h.add_argument("--unifi", help="path to a UniFi CyberSecure threat CSV export")
+    h.add_argument("--ssh-opt", metavar="\"-o ... -p ...\"",
+                   help="extra options passed verbatim to ssh for all remote "
+                        "fetches, e.g. \"-p 2222 -i ~/.ssh/hunt_key\"")
     h.add_argument("indicators", nargs="*", help="extra indicators to include")
     h.add_argument("--min-score", type=int, default=0,
                    help="only print findings at/above this score (default 0)")
