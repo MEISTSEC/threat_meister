@@ -293,9 +293,10 @@ that justified it — ready to drop into a ticket or writeup.
 ## Install (Arch)
 
 `setup_lab.sh` installs, from the official repos: `yara`, `clamav`, `rkhunter`,
-`jq`, `radare2`, `binutils`, `file`, `ssdeep`, `chkrootkit`, `lynis`. From the
+`jq`, `radare2`, `binutils`, `file`, `ssdeep`, `lynis`. From the
 AUR (via yay/paru): `capa` (ATT&CK capabilities), `detect-it-easy` (packer ID),
-`pev` (PE toolkit), `python-tlsh`, and `wazuh-agent`. It removes the `Example`
+`pev` (PE toolkit), `python-tlsh`, `chkrootkit` (second-opinion rootkit scanner),
+and `wazuh-agent`. It removes the `Example`
 line from the ClamAV configs, enables `clamav-freshclam` + `clamav-daemon`,
 baselines rkhunter (`--propupd`) and adds a weekly scan timer, creates the
 `/opt/threat_meister/dropzone`, installs the three modules

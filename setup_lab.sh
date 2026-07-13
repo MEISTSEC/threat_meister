@@ -21,11 +21,14 @@ PACMAN_PKGS=(
   ssdeep          # fuzzy hashing (CTPH)
   python          # for the threat_meister CLI
   unzip zip       # sample store handling
-  chkrootkit      # second-opinion rootkit scanner
   lynis           # host audit / hardening baseline
 )
 say "Installing repo packages: ${PACMAN_PKGS[*]}"
-sudo pacman -S --needed --noconfirm "${PACMAN_PKGS[@]}"
+# Don't let one unavailable/renamed package abort the whole bootstrap (we run
+# under `set -e`). Failures are surfaced as a warning; nothing here is required
+# for threat_meister's core static-analysis functions.
+sudo pacman -S --needed --noconfirm "${PACMAN_PKGS[@]}" \
+  || warn "some repo packages failed to install; review the pacman output above"
 
 # --- 2. AUR packages (optional but recommended) -----------------------------
 # Requires an AUR helper (yay/paru). These sharpen static triage.
@@ -34,6 +37,7 @@ AUR_PKGS=(
   detect-it-easy       # DIE: packer/compiler/entropy identification
   pev                  # PE analysis toolkit
   python-tlsh          # TLSH fuzzy hashing python binding
+  chkrootkit           # second-opinion rootkit scanner (AUR, not in official repos)
   wazuh-agent          # Wazuh endpoint agent
 )
 if command -v yay >/dev/null 2>&1; then AUR=yay
