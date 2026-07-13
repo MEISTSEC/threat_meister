@@ -916,6 +916,15 @@ def build_parser():
     g.add_argument("rest", nargs=argparse.REMAINDER, help="indicators + threathunt check args")
     g.set_defaults(func=cmd_intel)
 
+    # Registered so they appear in --help; main() intercepts them before argparse
+    # and forwards them to the threathunt engine against the lab's intel DB.
+    g = sub.add_parser("queue", help="show indicators queued for a resumed hunt")
+    g.add_argument("rest", nargs=argparse.REMAINDER, help="threathunt queue args")
+    g.set_defaults(func=lambda a: _delegate("queue", a.rest))
+    g = sub.add_parser("history", help="review past VT findings (no API calls)")
+    g.add_argument("rest", nargs=argparse.REMAINDER, help="threathunt history args")
+    g.set_defaults(func=lambda a: _delegate("history", a.rest))
+
     g = sub.add_parser("clamsig", help="export ClamAV .hdb hash signatures"); g.set_defaults(func=cmd_clamsig)
     g = sub.add_parser("ioc-export", help="export IOCs (csv|json)")
     g.add_argument("--format", choices=["csv","json"], default="csv"); g.set_defaults(func=cmd_ioc_export)
@@ -923,7 +932,8 @@ def build_parser():
     return p
 
 def _delegate(kind, rest):
-    """Pass-through to threathunt for `hunt`/`intel`, catalog-aware.
+    """Pass-through to threathunt for `hunt`/`intel`/`queue`/`history`,
+    catalog-aware and pointed at the lab's shared intel DB.
 
     Done before argparse so leading options (e.g. `hunt --min-score 50`) are
     forwarded verbatim instead of being rejected by threat_meister's own parser.
@@ -934,8 +944,13 @@ def _delegate(kind, rest):
     if "--db" not in rest:
         rest = ["--db", str(INTEL_DB)] + rest
     LAB_ROOT.mkdir(parents=True, exist_ok=True)
-    subcmd = "hunt" if kind == "hunt" else "check"
+    # threat_meister's verb -> threathunt's subcommand
+    subcmd = {"hunt": "hunt", "intel": "check",
+              "queue": "queue", "history": "history"}[kind]
     return th.main([subcmd, *rest])
+
+# threat_meister verbs that are thin pass-throughs to the threathunt engine.
+_THREATHUNT_VERBS = ("hunt", "intel", "queue", "history")
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -944,8 +959,8 @@ def main(argv=None):
         banner()
         build_parser().print_help(sys.stderr)
         return
-    # hunt/intel are thin pass-throughs to the threathunt engine.
-    if argv and argv[0] in ("hunt", "intel"):
+    # hunt/intel/queue/history are thin pass-throughs to the threathunt engine.
+    if argv and argv[0] in _THREATHUNT_VERBS:
         raise SystemExit(_delegate(argv[0], argv[1:]))
     args = build_parser().parse_args(argv)
     args.func(args)

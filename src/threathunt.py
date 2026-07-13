@@ -953,7 +953,7 @@ def build_markdown_report(verdicts: list[Verdict]) -> str:
         for heading, items in groups:
             if not items:
                 continue
-            out.append(f"## {heading} ({len(items)})")
+            out.append(f"### {heading} ({len(items)})")
             out.append("")
             for v in items:
                 _append_detail(out, v, band_emoji)
@@ -966,10 +966,31 @@ def build_markdown_report(verdicts: list[Verdict]) -> str:
     return "\n".join(out)
 
 
+def _fmt_ctx_value(key: str, val) -> str:
+    """Render one behavioural-context value for the report.
+
+    The catalog cross-reference (`lab_sample`) arrives as a dict; dumping it
+    raw prints Python repr with single quotes, which reads badly in a report.
+    Render it as a human sentence instead. Everything else is scalar.
+    """
+    if key == "lab_sample" and isinstance(val, dict):
+        sid = val.get("id")
+        fam = val.get("family") or val.get("category") or "catalogued"
+        cat = val.get("category")
+        via = val.get("via", "")
+        bits = [f"sample #{sid}" if sid is not None else "known sample"]
+        bits.append(f"{fam}/{cat}" if cat and cat != fam else str(fam))
+        text = " ".join(bits)
+        if via:
+            text += f" (matched via {via.replace('-', ' ')})"
+        return text
+    return str(val)
+
+
 def _append_detail(out: list[str], v: Verdict, band_emoji: dict) -> None:
     """Render one indicator's detail block into the report buffer."""
     label = band(v.risk_score)[0]
-    out.append(f"### {band_emoji.get(label,'')} `{_md_escape(v.ioc)}` "
+    out.append(f"#### {band_emoji.get(label,'')} `{_md_escape(v.ioc)}` "
                f"— {label} ({v.risk_score})")
     out.append("")
     if v.not_found:
@@ -991,9 +1012,15 @@ def _append_detail(out: list[str], v: Verdict, band_emoji: dict) -> None:
         for r in v.risk_reasons:
             out.append(f"    - {_md_escape(r)}")
     if v.context:
-        ctx_bits = [f"`{_md_escape(k)}={_md_escape(val)}`"
-                    for k, val in v.context.items()]
-        out.append(f"- **Context:** {', '.join(ctx_bits)}")
+        # Surface the lab-catalog match on its own line — it's the most
+        # meaningful piece of context, not just another key=value pair.
+        lab = v.context.get("lab_sample")
+        if isinstance(lab, dict):
+            out.append(f"- **Lab catalog:** {_md_escape(_fmt_ctx_value('lab_sample', lab))}")
+        ctx_bits = [f"`{_md_escape(k)}={_md_escape(_fmt_ctx_value(k, val))}`"
+                    for k, val in v.context.items() if k != "lab_sample"]
+        if ctx_bits:
+            out.append(f"- **Context:** {', '.join(ctx_bits)}")
     out.append("")
 
 
