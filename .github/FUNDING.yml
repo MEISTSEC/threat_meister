@@ -1,6 +1,5 @@
 # GitHub Sponsors button shown at the top of the repository page.
 # The custom link points at DONATE.md, which carries the Bitcoin address
 # together with a signature proving the address has not been tampered with.
-github: MEISTSEC
 buy_me_a_coffee: meistsec
 custom: ["https://github.com/MEISTSEC/threat_meister/blob/main/DONATE.md"]
