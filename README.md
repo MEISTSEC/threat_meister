@@ -34,6 +34,8 @@ out of sync.
 
 In a hurry? See `docs/quickstart.txt` for the end-to-end command sequence.
 
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/meistsec)
+
 ## Installation
 
 **Get the code.** Clone the repo (or use GitHub's "Download ZIP" and extract it):
