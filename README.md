@@ -410,6 +410,13 @@ to rule ids `108001`/`108010`.
   data, and private / loopback / link-local IPs are filtered out before any
   lookup, so internal addressing is never sent to VirusTotal.
 
+## Supporting the project
+
+Threat Meister is free and MIT-licensed. If it's useful to you and you'd like to
+support it, see [`DONATE.md`](DONATE.md) — via GitHub Sponsors, Buy Me a Coffee,
+or Bitcoin (the address there is signed, so you can verify it hasn't been tampered
+with before sending anything).
+
 ## License
 
 Released under the MIT License — Copyright (c) 2026 meistsec. See `LICENSE`.
