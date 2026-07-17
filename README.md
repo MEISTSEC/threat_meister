@@ -32,9 +32,8 @@ truth, samples are stored inert, and every detection artifact (YARA rule,
 ClamAV signature, IOC export) is generated *from* the catalog** so nothing drifts
 out of sync.
 
-In a hurry? See `docs/quickstart.txt` for the end-to-end command sequence.
-
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/meistsec)
+In a hurry? See `docs/quickstart.txt` for the end-to-end command sequence, or
+`docs/cheatsheet.md` for a categorized command reference.
 
 ## Installation
 
@@ -53,6 +52,19 @@ less setup_lab.sh          # read before running anything with sudo
 ./setup_lab.sh
 export PATH="$HOME/.local/bin:$PATH"   # add to ~/.bashrc to persist
 ```
+
+**Install (Debian / Ubuntu / Pop!_OS).** Use `setup_lab_debian.sh` instead — same
+steps, but with `apt` packages and Debian service names:
+
+```bash
+less setup_lab_debian.sh
+./setup_lab_debian.sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+A few triage tools (detect-it-easy, capa, pev) aren't in Debian's default repos;
+the script prints manual-install pointers for them and the tool works without
+them. `radare2` may need Ubuntu's `universe` component enabled.
 
 It installs the toolchain, copies the three modules into
 `~/.local/lib/threat_meister/`, symlinks `threat_meister` / `tm` / `threathunt`
@@ -413,9 +425,10 @@ to rule ids `108001`/`108010`.
 ## Supporting the project
 
 Threat Meister is free and MIT-licensed. If it's useful to you and you'd like to
-support it, see [`DONATE.md`](DONATE.md) — via GitHub Sponsors, Buy Me a Coffee,
-or Bitcoin (the address there is signed, so you can verify it hasn't been tampered
-with before sending anything).
+support it, see [`DONATE.md`](DONATE.md) — via GitHub Sponsors, or Bitcoin (the
+address there is signed, so you can verify it hasn't been tampered with before
+sending anything). Contributions of code, rules, and bug reports are equally
+welcome and cost nothing.
 
 ## License
 
